@@ -1011,6 +1011,35 @@ class OurTrainer(Trainer):
 
         return torch.stack(all_losses).mean()
 
+    ### NEW PERAMETER PERTRUB JAGUAR ### :
+    """def zo_perturb_parameters(self, random_seed=None, scaling_factor=1):
+        # Set the random seed to ensure that we sample the same z for perturbation/update
+        torch.manual_seed(random_seed if random_seed is not None else self.zo_random_seed)
+        self.sparse_grad_rng.manual_seed(self.sparse_grad_random_seed)
+
+        for name, param in self.named_parameters_to_optim:
+            grad_sparsity = self.get_grad_sparsity_by_name(name)
+            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            if grad_sparsity is not None:
+                z[fast_random_mask_like(z, grad_sparsity, generator=self.sparse_grad_rng)] = 0
+            param.data = param.data + scaling_factor * z * self.args.zo_eps"""
+
+    def jaguar_pertrub_parsmeters(self, param, i, scaling_factor=1):
+        """
+        Perturb the parameter at index i with tau (vectors).
+        Input:
+        - param: the parameter to perturb (torch.Tensor)
+        - i: the index to perturb (integer)
+        - scaling_factor: scaling factor for the perturbation (float)
+        """
+        tau = self.args.zo_tau
+        tau_update_vector = torch.zeros_like(param.data)
+        # print("TAU I SHAPE", tau_update_vector[i].shape): 2048 --> 8
+        tau_update_vector[i] = tau # Устанавливаем τ только в строке i
+        # print("TAU I", tau_update_vector[i]): вектор из tau
+        param.data = param.data + scaling_factor * tau_update_vector
+
+
     ### NEW METHOD JAGUAR ###
     @torch.no_grad()
     def zo_jaguar_step(self, model, inputs):
@@ -1028,78 +1057,48 @@ class OurTrainer(Trainer):
         self.zo_random_seed = np.random.randint(1000000000)
         torch.manual_seed(self.zo_random_seed)
 
-        # выбираем случайный индекс оптимизируемой строки параметров
-        i = np.random.randint(0, len(self.named_parameters_to_optim))
+        for name, param in self.named_parameters_to_optim:
+            # выбираем случайный индекс оптимизируемой строки параметров
+
+            i = np.random.randint(0, len(param.data))
+
+            # print("PARAM DATA SHAPE:", param.data.shape) - [8, 2048] --> [2048, 8]
+
+            # Сохраняем исходное состояние параметров
+            original_param = param.data.clone()
+
+            # z_+ = x + τ e_i
+            self.jaguar_pertrub_parsmeters(param, i, scaling_factor=1)
+            loss1 = self.zo_forward(model, inputs)
+
+            # z_- = x - τ e_i
+            self.jaguar_pertrub_parsmeters(param, i, scaling_factor=-2)
+            loss2 = self.zo_forward(model, inputs)
+
+            # Возвращаем параметры к исходному состоянию
+            param.data = original_param
+
+            # ρ = sign(f(z_+) - f(z_-))
+            rho = torch.sign(loss1 - loss2).item()
+
+            # grad_i = ρ τ e_i
+            if param.grad is None:
+                param.grad = torch.zeros_like(param.data)
+            # хочется на самом деле grad = param.grad, но с ним не очень обучение
+            grad = torch.zeros_like(param.data)
+            grad[i] = rho * args.zo_tau
+
+            # использование сглавживания (по умолчанию выключено) ДОДЕЛАТЬ
+            if args.zo_use_smoothing:
+                final_grad = (args.zo_beta * param.grad + (1 - args.zo_beta) * grad)
+            else:
+                final_grad = grad
+            
+            param.grad = final_grad
+
+            self.optimizer.step()
+            # param.grad = None
         
-        # X_i
-        name, param = self.named_parameters_to_optim[i]
-
-        # (τ, τ, ..., τ)
-        tau_update_vector = args.zo_tau * torch.ones_like(param.data)
-
-        # z_+ = x + (τ, τ, ..., τ)|_i
-        param.data += tau_update_vector
-        #param.data = param.data + 
-        # f(z_+)
-        loss1 = self.zo_forward(model, inputs)
-
-        # z_- = x - (τ, τ, ..., τ)|_i
-        param.data -= 2 * tau_update_vector
-        # f(z_-)
-        loss2 = self.zo_forward(model, inputs)
-
-        # Возвращаем параметр к исходному состоянию
-        param.data += tau_update_vector
-
-        # ρ = sign(f(z_+) - f(z_-))
-        rho = torch.sign(loss1 - loss2).item()
-
-        # grad_i = (τρ, τρ, ..., τρ)
-        grad = rho * tau_update_vector
-
-        # использование сглавживания (по умолчанию выключено) ДОДЕЛАТЬ
-        if args.zo_use_smoothing:
-            param.smooth_grad = (
-                args.zo_beta * param.smooth_grad +
-                (1 - args.zo_beta) * grad
-            )
-            final_grad = param.smooth_grad
-        else:
-            final_grad = grad
-        
-        param.grad = final_grad
-
-        self.optimizer.step()
-        param.grad = None
-        
-
-        # for name, param in self.named_parameters_to_optim:
-        # z_plus = param.data + 
-        # idx = tuple(torch.randint(0, s, (1,)).item() for s in param.shape)
-        # z[idx] = 1.0
-
-        # z_+ = x + τ e_i (первое возмущение)
-        # param.data += args.zo_eps * z
-        # loss1 = self.zo_forward(model, inputs)
-
-        # z_- = x - τ e_i (второе возмущение)
-        # param.data -= 2 * args.zo_eps * z
-        # loss2 = self.zo_forward(model, inputs)
-
-        # Возвращаем параметр к исходному состоянию
-        # param.data += args.zo_eps * z
-
-        # ρ = sign(f(z_+) - f(z_-))
-        # rho = torch.sign(loss1 - loss2).item()
-
-        # Задаём градиент только по выбранной координате: grad = τ ρ e_i
-        # param.grad = args.zo_eps * rho * z
-
-        # Обновляем параметр через оптимизатор
-        # self.optimizer.step()
-        # param.grad = None
-
-        # assert args.q == 1, "only support q=1 for the memory efficiency."
         assert self.args.gradient_accumulation_steps == 1
 
         return loss1
