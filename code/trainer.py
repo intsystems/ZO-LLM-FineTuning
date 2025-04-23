@@ -1151,7 +1151,7 @@ class OurTrainer(Trainer):
         return loss1
 
 
-        @torch.no_grad()
+    @torch.no_grad()
     def zo_jaguar_step(self, model, inputs, debug=False):
         """
         Эффективный шаг JAGUAR с одновременным искажением всех параметров, оптимизированный по памяти.
