@@ -1,4 +1,4 @@
-# # ZO LLM Fine-Tuning
+# ZO LLM Fine-Tuning
 
 **Author:** Grigory Evseev
 
